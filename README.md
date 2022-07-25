@@ -2,7 +2,7 @@
 
 This is repository for NSLP-G.
 Pytorch implementation of the paper [**"Non-Autoregressive Sign Language
-Production with Gaussian Space"**](https://arxiv.org/abs/2104.05670), [BMVC 2021](https://www.bmvc2021-virtualconference.com/assets/papers/1102.pdf).
+Production with Gaussian Space"**](https://www.bmvc2021-virtualconference.com/assets/papers/1102.pdf), [BMVC 2021](https://www.bmvc2021-virtualconference.com).
 
 ![teaser_dark](figures/nslpg.png)
 
