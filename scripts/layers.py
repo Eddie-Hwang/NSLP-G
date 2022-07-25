@@ -8,20 +8,6 @@ from einops import rearrange
 from transformers import BertModel, BertTokenizer
 
 
-def noised(inputs, noise_rate):
-    noise = inputs.data.new(inputs.size()).normal_(0, 1)
-    noised_inputs = inputs + noise * noise_rate 
-    
-    return noised_inputs
-
-
-def reparameterize(mu, logvar):
-    std = torch.exp(0.5 * logvar)
-    eps = torch.randn_like(std)
-    
-    return mu + eps * std
-
-
 def activation_fn(name):
     if name == 'relu':
         return nn.ReLU()
@@ -102,53 +88,22 @@ class LatentGenerator(nn.Module):
         return self.layers(inputs)
 
 
-class SignPoseVAE(nn.Module):
-    def __init__(
-        self,
-        enc_layer_dims: list = [240, 1024, 512],
-        dec_layer_dims: list = [512, 1024, 240],
-        z_dim: int = 64,
-        act: str = 'relu',
-        noise_rate: float = 0.01,
-        dropout: float = 0.1,
-    ):
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
         super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
 
-        self.z_dim = z_dim
-        self.noise_rate = noise_rate
+        position = torch.arange(max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+        pe = torch.zeros(max_len, 1, d_model)
+        pe[:, 0, 0::2] = torch.sin(position * div_term)
+        pe[:, 0, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe)
 
-        enc_layer_dims = enc_layer_dims + [z_dim]
-        dec_layer_dims = [z_dim] + dec_layer_dims
-        
-        self.encoder = PoseEmbLayer(enc_layer_dims, act, dropout)
-        
-        self.decoder = PoseGenerator(dec_layer_dims, act, dropout)
-
-        self.to_mu = nn.Linear(z_dim, z_dim)
-        self.to_logvar = nn.Linear(z_dim, z_dim)
-        
     def forward(self, x):
-        if self.training and self.noise_rate > 0.0:
-            x = noised(x, self.noise_rate)
-
-        enc_outputs = self.encoder(x)
-
-        mu = self.to_mu(enc_outputs)
-        logvar = self.to_logvar(enc_outputs)
-        
-        if self.training:
-            z = reparameterize(mu, logvar)
-        else:
-            z = mu
-        
-        recon_x = self.decoder(z)
-
-        return {
-            'recon_x': recon_x,
-            'mu': mu,
-            'logvar': logvar,
-            'z': z
-        }
-
-    def predict(self, z):
-        return self.decoder(z)
+        """
+        Args:
+            x: Tensor, shape [seq_len, batch_size, embedding_dim]
+        """
+        x = x + self.pe[:x.size(0)]
+        return self.dropout(x)
