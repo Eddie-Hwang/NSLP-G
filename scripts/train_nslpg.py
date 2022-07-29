@@ -5,16 +5,19 @@ import pytorch_lightning as pl
 import torch
 import torch.nn as nn
 from einops import rearrange
+from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
+from pytorch_lightning.loggers import TensorBoardLogger
 from torch.nn import functional as F
 from torch.nn.utils.rnn import pad_sequence
+from torch.utils.data import DataLoader
 
+from data import load_data
 from layers import PositionalEncoding
-from render import save_sign_video, save_sign_video_batch
-from slp_trainer import SignLanguageProductionTrainer
+from render import save_sign_video
 from tokenizer import (HugTokenizer, SimpleTokenizer, build_vocab_from_phoenix,
                        white_space_tokenizer)
-from train_spavae import SpatialVAE, SpatialVAEModule
-from utils import noised, postprocess
+from train_spavae import SpatialVAEModule
+from utils import postprocess
 
 
 class NonAutoRegressiveSLP(nn.Module):
@@ -112,13 +115,24 @@ class NonAutoRegressiveSLP(nn.Module):
         return parent_parser  
 
 
-class NonAutoRegressiveSLPModule(SignLanguageProductionTrainer):
+class NonAutoRegressiveSLPModule(pl.LightningModule):
     def __init__(
         self,
+        dataset_type,
+        num_save,
         train_path,
+        valid_path,
+        test_path,
+        batch_size,
+        num_workers,
+        lr,
         vae_ckpt,
         **kwargs
     ):
+        super().__init__()
+
+        self.save_hyperparameters()
+
         text_vocab = build_vocab_from_phoenix(train_path, white_space_tokenizer, mode = 'text')
         text_tokenizer = SimpleTokenizer(white_space_tokenizer, text_vocab)
         
@@ -135,14 +149,41 @@ class NonAutoRegressiveSLPModule(SignLanguageProductionTrainer):
             text_vocab_size = text_vocab_size,
             **kwargs
         )
+
+        self.model = model
+        self.tokenizer = text_tokenizer
+        self.min_seq_len = -1
+
+        # dataset related parameters
+        self.dataset_type = dataset_type
+        self.train_path = train_path
+        self.valid_path = valid_path
+        self.test_path = test_path
+
+        # Training related paramters
+        self.num_save = num_save
+        self.batch_size = batch_size
+        self.num_worker = num_workers
+        self.lr = lr
+
+    def setup(self, stage):
+        # load dataset
+        self.trainset, self.validset, self.testset = \
+            load_data(
+                self.dataset_type, 
+                self.train_path, 
+                self.valid_path, 
+                self.test_path, 
+                seq_len = -1, 
+                min_seq_len = self.min_seq_len
+            )
         
-        super().__init__(
-            model = model, 
-            tokenizer = text_tokenizer, 
-            train_path = train_path,
-            min_seq_len = -1,
-            **kwargs
-        )
+        print(f'[INFO] {self.dataset_type} dataset loaded with sequence length {self.min_seq_len}.')
+
+        if self.dataset_type == 'how2sign':
+            self.S = 3
+        else:
+            self.S = 1.5        
 
     def _common_step(self, batch, stage):
         id, text, joint = batch['id'], batch['text'], batch['joints']
@@ -226,8 +267,13 @@ class NonAutoRegressiveSLPModule(SignLanguageProductionTrainer):
             
             for n, t, g, o in zip(name, text, processed_generated, processed_origin):
                 save_sign_video(fpath = os.path.join(vid_save_path, f'{n}.mp4'), hyp = g, ref = o, sent = t, H = H, W = W)
-        
-        
+            
+    def training_step(self, batch, batch_idx):
+        return self._common_step(batch, 'tr')
+
+    def validation_step(self, batch, batch_idx):
+        return self._common_step(batch, 'val')
+
     def configure_optimizers(self):
         optim = torch.optim.AdamW(self.parameters(), lr = self.lr, amsgrad = True)
         sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -248,6 +294,80 @@ class NonAutoRegressiveSLPModule(SignLanguageProductionTrainer):
                 'frequency': self.trainer.check_val_every_n_epoch
             },
         }
+
+    def train_dataloader(self):
+        return DataLoader(
+            self.trainset, 
+            batch_size = self.batch_size, 
+            shuffle = True, 
+            num_workers = self.num_worker, 
+            collate_fn = self._collate_fn
+        )
+
+    def val_dataloader(self):
+        return DataLoader(
+            self.validset, 
+            batch_size = self.batch_size, 
+            shuffle = False, 
+            num_workers = self.num_worker, 
+            collate_fn = self._collate_fn
+        )
+
+    def test_dataloader(self):
+        return DataLoader(
+            self.testset, 
+            batch_size = 1, 
+            shuffle = False, 
+            num_workers = self.num_worker, 
+            collate_fn = self._collate_fn
+        )
+
+    def _collate_fn(self, batch):
+        id_list, text_list, joint_list = [], [], []
+        joint_input_ids_list, joint_pad_mask_list, joint_input_logits_list = [], [], []
+        
+        sorted_batch = sorted(batch, key = lambda x: x['frame_len'], reverse = True)
+        for data in sorted_batch:
+            id_list.append(data['id'])
+            text_list.append(data['text'])
+            joint_list.append(data['joint_feats'])
+            joint_input_ids_list.append(data['joint_input_ids'])
+            joint_pad_mask_list.append(data['joint_pad_mask'])
+            joint_input_logits_list.append(data['joint_input_logits'])
+
+        return {
+            'id': id_list,
+            'text': text_list,
+            'joints': joint_list,
+            'joint_input_ids': joint_input_ids_list,
+            'joint_pad_mask': joint_pad_mask_list,
+            'joint_input_logits': joint_input_logits_list
+        }
+
+    def get_callback_fn(self, monitor = 'val/loss', patience = 50):
+        early_stopping_callback = EarlyStopping(
+            monitor = monitor, 
+            patience = patience, 
+            mode = 'min', 
+            verbose = True
+        )
+        ckpt_callback = ModelCheckpoint(
+            filename = 'epoch={epoch}-val_loss={val/loss:.2f}', 
+            monitor = monitor, 
+            save_last = True, 
+            save_top_k = 1, 
+            mode = 'min', 
+            verbose = True,
+            auto_insert_metric_name = False
+        )
+        return early_stopping_callback, ckpt_callback
+
+    def get_logger(self, type = 'tensorboard', name = 'slp'):
+        if type == 'tensorboard':
+            logger = TensorBoardLogger("slp_logs", name = name)
+        else:
+            raise NotImplementedError
+        return logger
 
 
 def main(hparams):
