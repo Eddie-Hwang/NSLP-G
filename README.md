@@ -55,3 +55,14 @@ python scripts/train_nslpg.py \
     --valid_path {VALID_PATH} \
     --test_path {TEST_PATH}
 ```
+#### Training Transformer Autoencoder
+```bash
+python scripts/train_tfae.py \
+    --accelerator gpu --devices 0 \
+    --num_worker 8 --batch_size 64 \
+    --vae_ckpt {PRETRAINED_VAE_CKPT} \
+    --dataset_type {DATASET_TYPE} \
+    --train_path {TRAIN_PATH} \
+    --valid_path {VALID_PATH} \
+    --test_path {TEST_PATH}
+```

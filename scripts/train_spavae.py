@@ -83,7 +83,7 @@ class SpatialVAE(nn.Module):
 
         kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
 
-        bce_loss = F.binary_cross_entropy(recon_x, x, reduction = 'sum')
+        bce_loss = F.binary_cross_entropy(recon_x, x)
 
         if global_step != 0:
             self.kl_weight = min(self.kl_weight * math.exp(self.anneal_rate * global_step), 0.1)
@@ -410,21 +410,3 @@ if __name__=='__main__':
     hparams = parser.parse_args()
 
     main(hparams)
-
-
-'''
-(how2sign)
-python scripts/train_spavae.py \
-    --accelerator gpu --devices 1 \
-    --num_worker 8 --batch_size 64 \
-    --use_early_stopping
-
-python scripts/train_spavae.py \
-    --accelerator gpu --devices 0 \
-    --num_worker 8 --batch_size 64 \
-    --use_early_stopping \
-    --dataset_type phoenix \
-    --train_path /home/ejhwang/projects/phoenix14t/data/phoenix14t.pose.train \
-    --valid_path /home/ejhwang/projects/phoenix14t/data/phoenix14t.pose.dev \
-    --test_path /home/ejhwang/projects/phoenix14t/data/phoenix14t.pose.test
-'''

@@ -36,6 +36,7 @@ class PoseEmbLayer(nn.Module):
         for i, (in_dim, out_dim) in enumerate(zip(layer_dims[:-1], layer_dims[1:])):
             layers.append(nn.Linear(in_dim, out_dim))
             if i+2 < len(layer_dims):
+                layers.append(nn.LayerNorm(out_dim))
                 layers.append(activation_fn(act))
                 layers.append(nn.Dropout(dropout))
         self.layers = nn.Sequential(*layers)
@@ -57,6 +58,7 @@ class PoseGenerator(nn.Module):
         for i, (in_dim, out_dim) in enumerate(zip(layer_dims[:-1], layer_dims[1:])):
             layers.append(nn.Linear(in_dim, out_dim))
             if i + 1 < len(layer_dims) - 1:
+                layers.append(nn.LayerNorm(out_dim))
                 layers.append(activation_fn(act))
                 layers.append(nn.Dropout(dropout))            
             else:

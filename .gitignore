@@ -1,3 +1,4 @@
 backup
 *_logs
 __pycache__
+*.txt

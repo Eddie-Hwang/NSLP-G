@@ -413,11 +413,3 @@ if __name__=='__main__':
     hparams = parser.parse_args()
 
     main(hparams)
-
-
-'''
-(train on phoenix)
-python scripts/train_nslpg.py \
-    --accelerator gpu --devices 0 \
-    --num_worker 8 --batch_size 64
-'''
