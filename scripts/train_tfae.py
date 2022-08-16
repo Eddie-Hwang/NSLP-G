@@ -11,11 +11,12 @@ from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
-
+from fid import calculate_frechet_distance
 from data import load_data
 from layers import PoseEmbLayer, PoseGenerator
 from render import save_sign_video, save_sign_video_batch
 from utils import noised, postprocess
+import numpy as np
 
 
 class TransformerAutoencoder(nn.Module):
@@ -55,6 +56,7 @@ class TransformerAutoencoder(nn.Module):
             dropout = dropout,
             batch_first = True
         )
+        
         encoder = nn.TransformerEncoder(encoder_layer, num_hidden_layers)
         decoder = nn.TransformerDecoder(decoder_layer, num_hidden_layers)
 
@@ -144,6 +146,32 @@ class TransformerAutoencoder(nn.Module):
         
         return z_list
 
+    def eval_fgd(self, generated, reference, device = 'cpu'):
+        assert type(generated) == list, 'Inputs must be list of tensors.'
+
+        scores = []
+
+        pred_z = self.encode(generated, device = device)
+        pred_z = pad_sequence(pred_z, batch_first = True, padding_value = 0.)
+        pred_z = rearrange(pred_z, 'b t d -> (b t) d')
+
+        real_z = self.encode(reference, device = device)
+        real_z = pad_sequence(real_z, batch_first = True, padding_value = 0.)
+        real_z = rearrange(real_z, 'b t d -> (b t) d')
+
+        pred_mu = torch.mean(pred_z)
+        pred_sigma = torch.cov(pred_z)
+
+        real_mu = torch.mean(real_z)
+        real_sigma = torch.cov(real_z)
+
+        pred_mu, pred_sigma, real_mu, real_sigma \
+            = map(lambda x: x.cpu().numpy(), [pred_mu, pred_sigma, real_mu, real_sigma])
+        
+        score = calculate_frechet_distance(pred_mu, pred_sigma, real_mu, real_sigma)
+        
+        return score
+
     def add_model_specific_args(parent_parser):
         parser = parent_parser.add_argument_group('sp_vqvae')
         parser.add_argument('--layer_dims', nargs = '+', type = int, default = [240, 1024, 512])
@@ -211,7 +239,7 @@ class TransformerAutoencoderModule(pl.LightningModule):
                     min_seq_len = self.seq_len
                 )
         else:
-            _, _, self.testset = \
+            _, self.testset, _ = \
                 load_data(
                     self.dataset_type, 
                     self.train_path, 
@@ -293,6 +321,8 @@ class TransformerAutoencoderModule(pl.LightningModule):
         encoded = self.model.encode(joints, device = self.device)
         generated = self.model.generate(encoded, device = self.device)
 
+        self.model.eval_fgd(generated, joints, device = self.device)
+
         joints = [j.cpu() for j in joints]
         generated = [g.cpu() for g in generated]
         
@@ -355,8 +385,13 @@ class TransformerAutoencoderModule(pl.LightningModule):
                 os.makedirs(save_path)
 
             # save generated joint outputs
-            torch.save(decoded_list, os.path.join(save_path, 'outputs.pt'))
-
+            outputs = {
+                'outputs': decoded_list,
+                'texts': text_list,
+                'ids': id_list
+            }
+            torch.save(outputs, os.path.join(save_path, 'outputs.pt'))
+            
             _iter = zip(joints_list[:self.num_save], decoded_list[:self.num_save], id_list[:self.num_save], text_list[:self.num_save])
             for j, d, id, text in _iter:
                 j, d = map(lambda x: rearrange(x, 't (v c) -> t v c', c = 2), [j, d])
@@ -461,7 +496,7 @@ def main(hparams):
         # prevent resuming training
         hparams.ckpt = None
    
-    early_stopping, ckpt = module.get_callback_fn('val/loss', 50)
+    early_stopping, ckpt = module.get_callback_fn('val/loss', 30)
     
     callbacks_list = [ckpt]
 
@@ -472,10 +507,7 @@ def main(hparams):
     hparams.logger = logger
     
     # define trainer
-    trainer = pl.Trainer.from_argparse_args(
-        hparams, 
-        callbacks = callbacks_list
-    )
+    trainer = pl.Trainer.from_argparse_args(hparams, callbacks = callbacks_list)
 
     if not hparams.test:
         trainer.fit(module, ckpt_path = hparams.ckpt if hparams.ckpt != None else None)
