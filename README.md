@@ -65,3 +65,14 @@ python scripts/train_tfae.py \
     --valid_path {VALID_PATH} \
     --test_path {TEST_PATH}
 ```
+#### Evaluation FGD
+```bash
+python scripts/eval_fgd.py \
+        --ckpt {CHECKPOINT_PATH}
+        --dataset_type {DATASET_TYPE} \
+        --train_path {TRAIN_PATH} \
+        --valid_path {VALID_PATH} \
+        --test_path {TEST_PATH}
+        --device {CUDA_or_CPU} \
+        --input_dir {INPUT_DIR}
+```
