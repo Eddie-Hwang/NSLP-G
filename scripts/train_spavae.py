@@ -36,6 +36,7 @@ class SpatialVAE(nn.Module):
         dropout,
         kl_weight,
         anneal_rate,
+        loss_type,
         **kwargs
     ):
         super().__init__()
@@ -59,11 +60,9 @@ class SpatialVAE(nn.Module):
         self.anneal_rate = anneal_rate
         self.latent_dim = latent_dim
 
-    def forward(
-        self, 
-        x,
-        global_step
-    ):
+        self.loss_type = loss_type
+
+    def forward(self, x, global_step):
         if self.training and self.noise_rate > 0.0:
             noised_x = noised(x, self.noise_rate)
         else:
@@ -83,14 +82,17 @@ class SpatialVAE(nn.Module):
 
         kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
 
-        bce_loss = F.binary_cross_entropy(recon_x, x)
+        if self.loss_type != 'mse':
+            recon_loss = F.binary_cross_entropy(recon_x, x)
+        else:
+            recon_loss = F.mse_loss(recon_x, x)
 
         if global_step != 0:
             self.kl_weight = min(self.kl_weight * math.exp(self.anneal_rate * global_step), 0.1)
 
-        loss = bce_loss + self.kl_weight * kl_loss
+        loss = recon_loss + self.kl_weight * kl_loss
 
-        return loss, bce_loss, kl_loss, recon_x
+        return loss, recon_loss, kl_loss, recon_x
 
     def generate(self, z):
         return self.decoder(z)
@@ -155,10 +157,10 @@ class SpatialVAEModule(pl.LightningModule):
 
         joints = rearrange(joints, 'b t v c -> b t (v c)')
 
-        loss, bce_loss, kl_loss, _ = self.model(joints, self.global_step)
+        loss, recon_loss, kl_loss, _ = self.model(joints, self.global_step)
 
         self.log(f'{stage}/loss', loss, batch_size = self.batch_size)
-        self.log(f'{stage}/bce_loss', bce_loss, batch_size = self.batch_size)
+        self.log(f'{stage}/recon_loss', recon_loss, batch_size = self.batch_size)
         self.log(f'{stage}/kl_loss', kl_loss, batch_size = self.batch_size)
 
         if stage == 'tr':
@@ -227,7 +229,31 @@ class SpatialVAEModule(pl.LightningModule):
         return self._common_step(batch, 'val')
 
     def test_step(self, batch, batch_idx):
-        return self._common_step(batch, 'tst')
+        id, text, joint = batch['id'], batch['text'], batch['joints']
+
+        joint_len = [len(j) for j in joint]
+       
+        joint_input = pad_sequence(joint, batch_first = True)
+        joint_input = rearrange(joint_input, 'b t v c -> b t (v c)')
+        
+        z = self.model.encode(joint_input)
+
+        recon = self.model.generate(z)
+        recon = rearrange(recon, 'b t (v c) -> b t v c', c = 2)
+        recon = recon.cpu().detach()
+
+        generated = []
+        for r, l in zip(recon, joint_len):
+            generated.append(r[:l])
+
+        joint = [j.cpu().detach() for j in joint]
+        
+        return {
+            'id': id,
+            'text': text,
+            'origin': joint,
+            'generated': generated,
+        }
 
     def validation_epoch_end(self, outputs):
         H, W = 256, 256
@@ -250,21 +276,39 @@ class SpatialVAEModule(pl.LightningModule):
         H, W = 256, 256
         S = self.S
 
+        id_list, text_list, generated_list, origin_list = [], [], [], []
         for output in outputs:
-            id = output['_id']
-            text = output['_text']
+            id = output['id']
+            text = output['text']
+            generated = output['generated']
+            origin = output['origin']
+
+            id_list += id
+            text_list += text
+            generated_list += generated
+            origin_list += origin
+
+        if self.logger.save_dir != None:
+            save_path = os.path.join(self.logger.save_dir, self.logger.name, f'version_{str(self.logger.version)}/test_outputs')
+            if not os.path.exists(save_path):
+                os.makedirs(save_path)
+
+            # save generated joint outputs
+            outputs = {
+                'outputs': generated_list,
+                'reference': origin_list,
+                'texts': text_list,
+                'ids': id_list
+            }
+
+            torch.save(outputs, os.path.join(save_path, 'outputs.pt'))
             
-            origin = postprocess(output['_joint'], H, W, S)
-            generated = postprocess(output['_decoded'], H, W, S)
-            
-            if self.logger.save_dir != None:
-                save_path = os.path.join(self.logger.save_dir, self.logger.name, f'version_{str(self.logger.version)}/test_outputs')
-                
-                if not os.path.exists(save_path):
-                    os.makedirs(save_path)
-                
+            _iter = zip(origin_list[:self.num_save], generated_list[:self.num_save], id_list[:self.num_save], text_list[:self.num_save])
+            for j, d, id, text in _iter:               
+                origin = postprocess(j, H, W, S)
+                generated = postprocess(d, H, W, S)
                 save_sign_video(os.path.join(save_path, f'{id}.mp4'), generated, origin, text, H, W)
-            
+
     def configure_optimizers(self):
         optim = torch.optim.AdamW(self.parameters(), lr = self.lr, amsgrad = True)
         sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -293,7 +337,7 @@ class SpatialVAEModule(pl.LightningModule):
         return DataLoader(self.validset, batch_size = self.batch_size, shuffle = False, num_workers = self.num_worker, collate_fn = self._collate_fn)
 
     def test_dataloader(self):
-        return DataLoader(self.testset, batch_size = self.batch_size, shuffle = False, num_workers = self.num_worker, collate_fn = self._collate_fn)
+        return DataLoader(self.testset_full, batch_size = self.batch_size, shuffle = False, num_workers = self.num_worker, collate_fn = self._collate_fn)
 
     def _collate_fn(self, batch):
         id_list, text_list, joint_feat_list, frame_len_list = [], [], [], []
@@ -303,13 +347,13 @@ class SpatialVAEModule(pl.LightningModule):
             text_list.append(data['text'])
             joint_feat_list.append(data['joint_feats'])
             frame_len_list.append(data['frame_len'])
-        joint_feats_tensor = pad_sequence(joint_feat_list, batch_first = True, padding_value = 0.)
+        # joint_feats_tensor = pad_sequence(joint_feat_list, batch_first = True, padding_value = 0.)
 
         return {
             'id': id_list,
             'text': text_list,
-            'joint_feats': joint_feats_tensor,
-            'frame_len': frame_len_list
+            'joints': joint_feat_list,
+            # 'frame_len': frame_len_list
         }
 
     
@@ -321,7 +365,7 @@ def main(hparams):
     if not hparams.finetuning:
         module = SpatialVAEModule(**vars(hparams))
     else:
-        module = SpatioTemporalDiscreteVAEModule.load_from_checkpoint(hparams.ckpt)
+        module = SpatialVAEModule.load_from_checkpoint(hparams.ckpt)
         
         # manually change module paramters
         module.dataset_type = hparams.dataset_type
@@ -364,7 +408,7 @@ def main(hparams):
         callback_list.append(early_stopping_callback)
 
     # define logger
-    logger = TensorBoardLogger("slp_logs", name = 'spavae')
+    logger = TensorBoardLogger("slp_logs", name = hparams.log_name)
     hparams.logger = logger
     
     # define trainer
@@ -385,13 +429,12 @@ def main(hparams):
 if __name__=='__main__':
     parser = ArgumentParser(add_help=False)
     parser.add_argument('--seed', type = int, default = 42)
-    
     parser.add_argument('--dataset_type', default = 'how2sign')
     parser.add_argument('--train_path', default = '/home/ejhwang/projects/how2sign/how2sign_realigned_train.csv')
     parser.add_argument('--valid_path', default = '/home/ejhwang/projects/how2sign/how2sign_realigned_val.csv')
     parser.add_argument('--test_path', default = '/home/ejhwang/projects/how2sign/how2sign_realigned_test.csv')
     parser.add_argument("--fast_dev_run", action = "store_true")
-    parser.add_argument('--seq_len', type = int, default = 1)
+    parser.add_argument('--seq_len', type = int, default = 32)
     parser.add_argument("--batch_size", type = int, default = 2)
     parser.add_argument("--num_workers", type = int, default = 0)
     parser.add_argument("--max_epochs", type = int, default = 500)
@@ -405,6 +448,7 @@ if __name__=='__main__':
     parser.add_argument('--finetuning', action = 'store_true')
     parser.add_argument('--test', action = 'store_true')
     parser.add_argument('--use_early_stopping', action = 'store_true')
+    parser.add_argument('--log_name', type = str, default = 'spvae')
 
     parser = SpatialVAE.add_model_specific_args(parser)
     hparams = parser.parse_args()

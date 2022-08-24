@@ -20,6 +20,51 @@ from train_spavae import SpatialVAEModule
 from utils import postprocess
 
 
+def set_whitespace_tokenizer(train_path, mode = 'text', **kwargs):
+    _vocab = build_vocab_from_phoenix(train_path, white_space_tokenizer, mode = mode)
+    _tokenizer = SimpleTokenizer(white_space_tokenizer, _vocab)
+
+    return {
+        'tokenizer': _tokenizer,
+        'pad_token': _tokenizer.pad_token,
+        'start_token': _tokenizer.start_token,
+        'end_token': _tokenizer.end_token,
+        'vocab': _vocab,
+        'vocab_size': len(_vocab)
+    }
+
+
+def set_hug_tokenizer(tokenizer_fpath, **kwargs):
+    os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+    _tokenizer = HugTokenizer(tokenizer_fpath)
+
+    return {
+        'tokenizer': _tokenizer, 
+        'pad_token': _tokenizer.pad_token,
+        'start_token': _tokenizer.start_token,
+        'end_token': _tokenizer.end_token,
+        'vocab_size': _tokenizer.vocab_size
+    }
+
+
+def set_tokenizer_dict():
+    return {
+        'whitespace': set_whitespace_tokenizer,
+        'wordpiece': set_hug_tokenizer,
+        'bpe': set_hug_tokenizer,
+    }
+
+
+def load_pretrained_vae(finetuning, ckpt):
+    vae = SpatialVAEModule.load_from_checkpoint(ckpt)
+    if not finetuning:
+        vae.eval()
+        vae.freeze()
+    vae = vae.model
+
+    return vae
+
+
 class NonAutoRegressiveSLP(nn.Module):
     def __init__(
         self,
@@ -31,6 +76,9 @@ class NonAutoRegressiveSLP(nn.Module):
         dropout,
         text_vocab_size,
         max_seq_len,
+        gloss_supervision,
+        gloss_vocab_size,
+        alpha,
         **kwargs
     ):
         super().__init__()
@@ -41,27 +89,46 @@ class NonAutoRegressiveSLP(nn.Module):
         
         pos_emb = PositionalEncoding(hidden_size, max_len = max_seq_len)
 
-        model = nn.Transformer(
+        encoder_layer = nn.TransformerEncoderLayer(
             d_model = hidden_size,
             nhead = num_attention_head,
-            num_encoder_layers = num_hidden_layers,
+            dim_feedforward = intermediate_size,
+            dropout = dropout,
+            batch_first = True
+        )
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model = hidden_size,
+            nhead = num_attention_head,
             dim_feedforward = intermediate_size,
             dropout = dropout,
             batch_first = True
         )
 
-        to_latent = nn.Sequential(
-            nn.ReLU(),
-            nn.LayerNorm(hidden_size),
-            nn.Linear(hidden_size, latent_dim)
-        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_hidden_layers)
+        self.decoder = nn.TransformerDecoder(decoder_layer, num_hidden_layers)
 
-        self.model = model
-        self.to_latent = to_latent
+        if gloss_supervision:
+            gloss_decoder_layer = nn.TransformerDecoderLayer(
+                d_model = hidden_size,
+                nhead = num_attention_head,
+                dim_feedforward = intermediate_size,
+                dropout = dropout,
+                batch_first = True
+            )
+            
+            self.gloss_decoder = nn.TransformerDecoder(gloss_decoder_layer, num_hidden_layers)
+            self.to_gloss = nn.Linear(hidden_size, gloss_vocab_size)
+            self.gloss_emb = nn.Embedding(gloss_vocab_size, hidden_size)
+
+        self.to_latent = nn.Linear(hidden_size, latent_dim)
+
+        # self.model = model
         self.text_emb = text_emb
         self.pos_emb = pos_emb
         self.vae = vae
         self.hidden_size = hidden_size
+        self.gloss_supervision = gloss_supervision
+        self.alpha = alpha
 
     def forward(
         self,
@@ -70,6 +137,9 @@ class NonAutoRegressiveSLP(nn.Module):
         joint_inputs,
         joint_pad_mask,
         return_outs = False,
+        gloss_input_ids = None,
+        gloss_pad_mask = None,
+        gloss_pad_token = None,
         device = 'cpu'
     ):
         embed_text = self.text_emb(text_input_ids)
@@ -82,12 +152,9 @@ class NonAutoRegressiveSLP(nn.Module):
         time_qeuries = self.pos_emb(time_qeuries)
         time_qeuries = rearrange(time_qeuries, 't b d -> b t d')
         
-        logits = self.model(
-            src = embed_text,
-            tgt = time_qeuries,
-            src_key_padding_mask = text_pad_mask,
-            tgt_key_padding_mask = joint_pad_mask
-        )
+        enc_outs = self.encoder(embed_text, src_key_padding_mask = text_pad_mask)
+
+        logits = self.decoder(time_qeuries, enc_outs, tgt_key_padding_mask = joint_pad_mask)
 
         z = self.to_latent(logits)
 
@@ -95,23 +162,44 @@ class NonAutoRegressiveSLP(nn.Module):
         
         if return_outs:
             return outs
-
-        loss = F.mse_loss(outs, joint_inputs, reduction = 'none')
-        loss = loss.sum(-1)
-        loss.masked_fill_(joint_pad_mask, 0.)
-        loss = loss.mean()
         
-        return loss
+        if self.gloss_supervision:
+            gloss_embed = self.gloss_emb(gloss_input_ids)
+            
+            gloss_logits = self.gloss_decoder(gloss_embed, enc_outs, tgt_key_padding_mask = gloss_pad_mask)
+            gloss_logits = self.to_gloss(gloss_logits)
+            gloss_logits = rearrange(gloss_logits, 'b t d -> b d t')
+            
+            gloss_loss = F.cross_entropy(gloss_logits, gloss_input_ids, ignore_index = gloss_pad_token)
+        else:
+            gloss_loss = 0.
+
+        mse_loss = F.mse_loss(outs, joint_inputs, reduction = 'none')
+        mse_loss = mse_loss.sum(-1)
+        mse_loss.masked_fill_(joint_pad_mask, 0.)
+        mse_loss = mse_loss.mean()
+
+        alpha = self.alpha
+        
+        loss = mse_loss + alpha * gloss_loss
+
+        return loss, mse_loss, gloss_loss
 
     def add_model_specific_args(parent_parser):
         parser = parent_parser.add_argument_group('nslpg')   
         parser.add_argument('--hidden_size', type = int, default = 512)
         parser.add_argument('--num_attention_head', type = int, default = 8)
-        parser.add_argument('--num_hidden_layers', type = int, default = 2)
+        parser.add_argument('--num_hidden_layers', type = int, default = 4)
         parser.add_argument('--intermediate_size', type = int, default = 1024)
         parser.add_argument('--max_seq_len', type = int, default = 512)
+        parser.add_argument('--min_seq_len', type = int, default = 32)
         parser.add_argument('--dropout', type = float, default = 0.)
         parser.add_argument('--vae_ckpt', type = str, default = './slp_logs/spavae/phoenix/checkpoints/last.ckpt')
+        parser.add_argument('--tokenizer_type', type = str, default = 'whitespace')
+        parser.add_argument('--tokenizer_fpath', type = str, default = None)
+        parser.add_argument('--vae_ft', action = 'store_true')
+        parser.add_argument('--gloss_supervision', action = 'store_true')
+        parser.add_argument('--alpha', type = float, default = 0.)
         return parent_parser  
 
 
@@ -127,32 +215,53 @@ class NonAutoRegressiveSLPModule(pl.LightningModule):
         num_workers,
         lr,
         vae_ckpt,
+        tokenizer_type,
+        tokenizer_fpath,
+        min_seq_len,
+        max_seq_len,
+        vae_ft,
+        save_vids,
+        gloss_supervision,
         **kwargs
     ):
         super().__init__()
 
         self.save_hyperparameters()
 
-        text_vocab = build_vocab_from_phoenix(train_path, white_space_tokenizer, mode = 'text')
-        text_tokenizer = SimpleTokenizer(white_space_tokenizer, text_vocab)
+        tokenizer_dict = set_tokenizer_dict()
         
-        text_vocab_size = text_tokenizer.vocab_size
-        text_pad_token = text_tokenizer.pad_token
+        _tokenizer = tokenizer_dict[tokenizer_type](
+            train_path = train_path, 
+            tokenizer_fpath = tokenizer_fpath, 
+        )
+        
+        text_vocab_size = _tokenizer['vocab_size']
+        text_pad_token = _tokenizer['pad_token']
+        text_tokenizer = _tokenizer['tokenizer']
 
-        vae = SpatialVAEModule.load_from_checkpoint(vae_ckpt)
-        vae.eval()
-        vae.freeze()
-        vae = vae.model
+        if dataset_type == 'how2sign':
+            assert gloss_supervision != True, 'How2Sign does not yet contain gloss.'
 
+        if gloss_supervision:
+            _gloss_tokenizer = set_whitespace_tokenizer(train_path, 'gloss')
+            gloss_vocab_size = _gloss_tokenizer['vocab_size']
+            self.gloss_pad_token = _gloss_tokenizer['pad_token']
+            self.gloss_tokenizer = _gloss_tokenizer['tokenizer']
+
+        vae = load_pretrained_vae(vae_ft, ckpt = vae_ckpt)
         model = NonAutoRegressiveSLP(
             vae = vae, 
-            text_vocab_size = text_vocab_size,
+            text_vocab_size = text_vocab_size, 
+            gloss_vocab_size = gloss_vocab_size if gloss_supervision else None,
+            max_seq_len = max_seq_len,
+            gloss_supervision = gloss_supervision,
             **kwargs
         )
 
         self.model = model
         self.tokenizer = text_tokenizer
-        self.min_seq_len = -1
+        self.min_seq_len = min_seq_len
+        self.max_seq_len = max_seq_len
 
         # dataset related parameters
         self.dataset_type = dataset_type
@@ -165,6 +274,8 @@ class NonAutoRegressiveSLPModule(pl.LightningModule):
         self.batch_size = batch_size
         self.num_worker = num_workers
         self.lr = lr
+        self.save_vids = save_vids
+        self.gloss_supervision = gloss_supervision
 
     def setup(self, stage):
         # load dataset
@@ -174,11 +285,11 @@ class NonAutoRegressiveSLPModule(pl.LightningModule):
                 self.train_path, 
                 self.valid_path, 
                 self.test_path, 
-                seq_len = -1, 
+                seq_len = self.max_seq_len, 
                 min_seq_len = self.min_seq_len
             )
         
-        print(f'[INFO] {self.dataset_type} dataset loaded with sequence length {self.min_seq_len}.')
+        print(f'[INFO] {self.dataset_type} dataset loaded with sequence length {self.max_seq_len}.')
 
         if self.dataset_type == 'how2sign':
             self.S = 3
@@ -186,7 +297,8 @@ class NonAutoRegressiveSLPModule(pl.LightningModule):
             self.S = 1.5        
 
     def _common_step(self, batch, stage):
-        id, text, joint = batch['id'], batch['text'], batch['joints']
+        id, text, gloss, joint = \
+            batch['id'], batch['text'], batch['gloss'], batch['joints']
 
         text_input_ids, text_pad_mask = self.tokenizer.encode(
             text, 
@@ -203,15 +315,31 @@ class NonAutoRegressiveSLPModule(pl.LightningModule):
         joint_input = pad_sequence(joint, batch_first = True)
         joint_input = rearrange(joint_input, 'b t v c -> b t (v c)')
 
-        loss = self.model(
+        if self.gloss_supervision:
+            gloss_input_ids, gloss_pad_mask = self.gloss_tokenizer.encode(
+                gloss,
+                padding = True,
+                add_special_tokens = False,
+                device = self.device
+            )
+            gloss_pad_mask = ~(gloss_pad_mask.bool()).to(self.device)
+        else:
+            gloss_input_ids, gloss_pad_mask = None, None
+        
+        loss, mse_loss, gloss_loss = self.model(
             text_input_ids = text_input_ids,
             text_pad_mask = text_pad_mask,
             joint_inputs = joint_input,
             joint_pad_mask = joint_pad_mask,
+            gloss_input_ids = gloss_input_ids,
+            gloss_pad_mask = gloss_pad_mask,
+            gloss_pad_token = self.gloss_pad_token if self.gloss_supervision else None,
             device = self.device
         )
 
         self.log(f'{stage}/loss', loss, batch_size = self.batch_size)
+        self.log(f'{stage}/mse_loss', mse_loss, batch_size = self.batch_size)
+        self.log(f'{stage}/gloss_loss', gloss_loss, batch_size = self.batch_size)
 
         if stage == 'tr':
             return loss
@@ -229,19 +357,28 @@ class NonAutoRegressiveSLPModule(pl.LightningModule):
         generated = rearrange(generated, 'b t (v c) -> b t v c', c = 2)
         generated = generated.cpu()
 
-        origin = list(joint[i].cpu() for i in idx)
-        text = list(text[i] for i in idx)
-        name = list(id[i] for i in idx)
+        origin_list = list(joint[i].cpu() for i in idx)
+        text_list = list(text[i] for i in idx)
+        id_list = list(id[i] for i in idx)
         
         return {
             'loss': loss,
-            'name': name,
-            'text': text,
-            'origin': origin,
+            'id': id_list,
+            'text': text_list,
+            'origin': origin_list,
             'generated': generated,
         }
+            
+    def training_step(self, batch, batch_idx):
+        return self._common_step(batch, 'tr')
 
-    def _common_epoch_end(self, outputs, stage):
+    def validation_step(self, batch, batch_idx):
+        return self._common_step(batch, 'val')
+
+    def test_step(self, batch, batch_idx):
+        return self._common_step(batch, 'tst')
+
+    def validation_epoch_end(self, outputs):
         H, W = 256, 256
         S = self.S
 
@@ -250,7 +387,7 @@ class NonAutoRegressiveSLPModule(pl.LightningModule):
         origin = output['origin']
         generated = output['generated']
         text = output['text']
-        name = output['name']
+        id = output['id']
 
         processed_origin, processed_generated = [], []
         for ori, gen in zip(origin, generated):
@@ -265,17 +402,55 @@ class NonAutoRegressiveSLPModule(pl.LightningModule):
             if not os.path.exists(vid_save_path):
                 os.makedirs(vid_save_path)
             
-            for n, t, g, o in zip(name, text, processed_generated, processed_origin):
+            for n, t, g, o in zip(id, text, processed_generated, processed_origin):
                 save_sign_video(fpath = os.path.join(vid_save_path, f'{n}.mp4'), hyp = g, ref = o, sent = t, H = H, W = W)
-            
-    def training_step(self, batch, batch_idx):
-        return self._common_step(batch, 'tr')
 
-    def validation_step(self, batch, batch_idx):
-        return self._common_step(batch, 'val')
+    def test_epoch_end(self, outputs):
+        H, W = 256, 256
+        S = self.S
+
+        id_list, text_list, generated_list, origin_list = [], [], [], []
+        for output in outputs:
+            id = output['id']
+            text = output['text']
+            generated = output['generated']
+            origin = output['origin']
+
+            id_list += id
+            text_list += text
+            generated_list += generated
+            origin_list += origin
+
+        if self.logger.save_dir != None:
+            save_path = os.path.join(self.logger.save_dir, self.logger.name, f'version_{str(self.logger.version)}/test_outputs')
+            if not os.path.exists(save_path):
+                os.makedirs(save_path)
+
+            # save generated joint outputs
+            outputs = {
+                'outputs': generated_list,
+                'reference': origin_list,
+                'texts': text_list,
+                'ids': id_list
+            }
+
+            torch.save(outputs, os.path.join(save_path, 'outputs.pt'))
+            
+            if not self.save_vids:
+                return
+            
+            _iter = zip(origin_list[:self.num_save], generated_list[:self.num_save], id_list[:self.num_save], text_list[:self.num_save])
+            for j, d, id, text in _iter:
+                if len(j.size()) == 2:
+                    j, d = map(lambda x: rearrange(x, 't (v c) -> t v c', c = 2), [j, d])
+                
+                origin = postprocess(j, H, W, S)
+                generated = postprocess(d, H, W, S)
+                
+                save_sign_video(os.path.join(save_path, f'{id}.mp4'), generated, origin, text, H, W)
 
     def configure_optimizers(self):
-        optim = torch.optim.AdamW(self.parameters(), lr = self.lr, amsgrad = True)
+        optim = torch.optim.AdamW(self.parameters(), lr = self.lr)
         sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer = optim,
             mode = 'min',
@@ -290,7 +465,7 @@ class NonAutoRegressiveSLPModule(pl.LightningModule):
             'optimizer': optim,
             'lr_scheduler': {
                 'scheduler': sched,
-                'monitor': 'val/loss',
+                'monitor': 'tr/loss',
                 'frequency': self.trainer.check_val_every_n_epoch
             },
         }
@@ -316,32 +491,28 @@ class NonAutoRegressiveSLPModule(pl.LightningModule):
     def test_dataloader(self):
         return DataLoader(
             self.testset, 
-            batch_size = 1, 
+            batch_size = self.batch_size, 
             shuffle = False, 
             num_workers = self.num_worker, 
             collate_fn = self._collate_fn
         )
 
     def _collate_fn(self, batch):
-        id_list, text_list, joint_list = [], [], []
-        joint_input_ids_list, joint_pad_mask_list, joint_input_logits_list = [], [], []
+        id_list, text_list, gloss_list, joint_list = [], [], [], []
         
         sorted_batch = sorted(batch, key = lambda x: x['frame_len'], reverse = True)
         for data in sorted_batch:
             id_list.append(data['id'])
             text_list.append(data['text'])
             joint_list.append(data['joint_feats'])
-            joint_input_ids_list.append(data['joint_input_ids'])
-            joint_pad_mask_list.append(data['joint_pad_mask'])
-            joint_input_logits_list.append(data['joint_input_logits'])
+            if 'gloss' in data.keys():
+                gloss_list.append(data['gloss'])
 
         return {
             'id': id_list,
             'text': text_list,
             'joints': joint_list,
-            'joint_input_ids': joint_input_ids_list,
-            'joint_pad_mask': joint_pad_mask_list,
-            'joint_input_logits': joint_input_logits_list
+            'gloss': gloss_list
         }
 
     def get_callback_fn(self, monitor = 'val/loss', patience = 50):
@@ -375,19 +546,23 @@ def main(hparams):
     
     module = NonAutoRegressiveSLPModule(**vars(hparams))
     
-    early_stopping, ckpt = module.get_callback_fn('val/loss', 50)
+    early_stopping, ckpt = module.get_callback_fn('tr/loss', 20)
     
     callbacks_list = [ckpt]
 
     if hparams.use_early_stopping:
         callbacks_list.append(early_stopping)
     
-    logger = module.get_logger('tensorboard', name = 'narslp')
+    logger = module.get_logger('tensorboard', name = hparams.log_name)
     hparams.logger = logger
     
     trainer = pl.Trainer.from_argparse_args(hparams, callbacks = callbacks_list)
-    trainer.fit(module)
-
+    if not hparams.test:
+        trainer.fit(module, ckpt_path = hparams.ckpt if hparams.ckpt != None else None)
+    else:
+        assert hparams.ckpt != None, 'Trained checkpoint must be provided.'
+        trainer.test(module, ckpt_path = hparams.ckpt)
+        
 
 if __name__=='__main__':
     parser = ArgumentParser(add_help=False)
@@ -408,6 +583,10 @@ if __name__=='__main__':
     parser.add_argument('--lr', type = float, default = 1e-4)
     parser.add_argument('--use_early_stopping', action = 'store_true')
     parser.add_argument('--gradient_clip_val', type = float, default = 0.0)
+    parser.add_argument('--log_name', type = str, default = 'narslp')
+    parser.add_argument('--ckpt', default = None)
+    parser.add_argument('--test', action = 'store_true')
+    parser.add_argument('--save_vids', action = 'store_true')
 
     parser = NonAutoRegressiveSLP.add_model_specific_args(parser)
     hparams = parser.parse_args()

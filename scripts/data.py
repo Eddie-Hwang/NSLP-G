@@ -12,9 +12,12 @@ from utils import load_dirs, load_json
 
 
 def get_random_seq(seq, seq_len):
-    start = random.randrange(0, len(seq) + 1 - seq_len)
-    end = start + seq_len
-    return seq[start : end]
+    if seq.shape[0] > seq_len:
+        start = random.randrange(0, len(seq) + 1 - seq_len)
+        end = start + seq_len
+        seq = seq[start : end]
+
+    return seq
 
 
 def load_data(
@@ -255,9 +258,9 @@ class Phoenix2014TDataset(Dataset):
         data = self.data[index]
 
         _, id = os.path.split(data['name'])
+        
         text = data['text']
         gloss = data['gloss']
-        
         joint = data['sign']
         
         if self.seq_len != -1:
@@ -294,17 +297,12 @@ class Phoenix2014TDataset(Dataset):
 
             joint_feats += 0.1
 
-        joint_input_ids, joint_input_logits, joint_pad_mask = None, None, None
-
         return {
             'id': id,
             'text': text,
             'gloss': gloss,
             'joint_feats': joint_feats,
-            'frame_len': len(joint_feats),
-            'joint_input_ids': joint_input_ids,
-            'joint_pad_mask': joint_pad_mask,
-            'joint_input_logits': joint_input_logits
+            'frame_len': len(joint_feats)
         }
 
     def __len__(self):

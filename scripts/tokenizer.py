@@ -1,8 +1,12 @@
+import os
+
 import pandas as pd
 import torch
-from torchtext.vocab import build_vocab_from_iterator
-from transformers import BertTokenizer, GPT2Tokenizer
+from tokenizers import Tokenizer
+from tokenizers.processors import TemplateProcessing
 from torch.nn.utils.rnn import pad_sequence
+from torchtext.vocab import build_vocab_from_iterator
+
 from utils import load_data
 
 
@@ -99,42 +103,51 @@ class SimpleTokenizer:
 
 
 class HugTokenizer:
-    def __init__(self, model = 'bert-base-uncased'):
-        tokenizer = BertTokenizer.from_pretrained(model)
+    def __init__(self, fpath):
+        tokenizer = Tokenizer.from_file(fpath)
         
-        self.vocab_size = tokenizer.vocab_size
+        tokenizer.enable_padding(
+            pad_id = tokenizer.token_to_id('<pad>'), 
+            pad_token = '<pad>'
+        )
         
-        self.pad_token = tokenizer.pad_token_id
-        self.start_token = tokenizer.bos_token_id
-        self.end_token = tokenizer.eos_token_id
+        tokenizer.post_processor = TemplateProcessing(
+            single="<bos> $A <eos>",
+            # pair="[CLS] $A [SEP] $B:1 [SEP]:1",
+            special_tokens=[
+                ("<bos>", tokenizer.token_to_id("<bos>")),
+                ("<eos>", tokenizer.token_to_id("<eos>")),
+            ],
+        )
         
+        self.pad_token = tokenizer.token_to_id('<pad>')
+        self.start_token = tokenizer.token_to_id('<bos>')
+        self.end_token = tokenizer.token_to_id('<eos>')
+        self.vocab_size = tokenizer.get_vocab_size()
         self.tokenizer = tokenizer
-
-    def set_max_length(self, max_len):
-        self.tokenizer.model_max_length = max_len
 
     def encode(
         self, 
         texts, 
         padding, 
-        add_special_tokens = False, 
+        add_special_tokens, 
         device = 'cpu'
     ):
-        encoded = self.tokenizer.batch_encode_plus(
-            texts, 
-            return_tensors = 'pt', 
-            padding = padding, 
-            truncation = True,
-            add_special_tokens = add_special_tokens
-        )
+        encoded_list = self.tokenizer.encode_batch(texts, add_special_tokens = add_special_tokens)
+        
+        input_ids, attention_mask = [], []
+        for encoded in encoded_list:
+            input_ids.append(encoded.ids)
+            attention_mask.append(encoded.attention_mask)
 
-        input_ids = encoded.input_ids.to(device)
-        pad_mask = encoded.attention_mask.to(device)
+        input_ids = torch.tensor(input_ids, device = device)
+        attention_mask = torch.tensor(attention_mask, device = device)
+        
+        return input_ids, attention_mask
 
-        return input_ids, pad_mask
-      
-    def decode(self, tokens):
-        decoded = self.tokenizer.batch_decode(tokens, skip_special_tokens=True)
+    def decode(self, tokens, **kwargs):
+        if isinstance(tokens, torch.Tensor):
+            tokens = tokens.tolist()
+        decoded = self.tokenizer.decode_batch(tokens, skip_special_tokens = True)
+
         return decoded
-
-    

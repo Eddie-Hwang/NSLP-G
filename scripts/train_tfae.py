@@ -1,7 +1,9 @@
+import math
 import os
 import random
 from argparse import ArgumentParser
-from layers import PositionalEncoding
+
+import numpy as np
 import pytorch_lightning as pl
 import torch
 import torch.nn as nn
@@ -11,12 +13,27 @@ from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
-from fid import calculate_frechet_distance
+
 from data import load_data
-from layers import PoseEmbLayer, PoseGenerator
+from fid import calculate_frechet_distance
+from layers import PoseEmbLayer, PoseGenerator, PositionalEncoding
 from render import save_sign_video, save_sign_video_batch
 from utils import noised, postprocess
-import numpy as np
+
+
+def get_mean_cov(x):
+    if isinstance(x, torch.Tensor):
+        x = x.cpu().numpy()
+    return x.mean(axis = 0), np.cov(x, rowvar = False)
+
+
+def cal_mean_for_length(x, device):
+    mask = torch.tensor([len(x) for _x in x], device = device)
+    x = pad_sequence(x, batch_first = True, padding_value = 0.)
+    # x = x.sum(1) / mask.unsqueeze(1)
+    x = rearrange(x, 'b t d -> (b t) d')
+    
+    return x
 
 
 class TransformerAutoencoder(nn.Module):
@@ -140,6 +157,7 @@ class TransformerAutoencoder(nn.Module):
 
             _chunk_feat = self.pre(_chunk_feat)
             z = self.encoder(_chunk_feat)
+            
             z = z.mean(1)
             
             z_list.append(z)
@@ -149,24 +167,14 @@ class TransformerAutoencoder(nn.Module):
     def eval_fgd(self, generated, reference, device = 'cpu'):
         assert type(generated) == list, 'Inputs must be list of tensors.'
 
-        scores = []
-
         pred_z = self.encode(generated, device = device)
-        pred_z = pad_sequence(pred_z, batch_first = True, padding_value = 0.)
-        pred_z = rearrange(pred_z, 'b t d -> (b t) d')
-
         real_z = self.encode(reference, device = device)
-        real_z = pad_sequence(real_z, batch_first = True, padding_value = 0.)
-        real_z = rearrange(real_z, 'b t d -> (b t) d')
 
-        pred_mu = torch.mean(pred_z)
-        pred_sigma = torch.cov(pred_z)
-
-        real_mu = torch.mean(real_z)
-        real_sigma = torch.cov(real_z)
-
-        pred_mu, pred_sigma, real_mu, real_sigma \
-            = map(lambda x: x.cpu().numpy(), [pred_mu, pred_sigma, real_mu, real_sigma])
+        pred_z, real_z = map(lambda x: cal_mean_for_length(x, device), [pred_z, real_z])
+        # pred_z, real_z = map(lambda x: torch.vstack(x), [pred_z, real_z])
+                
+        (pred_mu, pred_sigma), (real_mu, real_sigma) = \
+            map(lambda x: get_mean_cov(x), [pred_z, real_z])
         
         score = calculate_frechet_distance(pred_mu, pred_sigma, real_mu, real_sigma)
         
@@ -321,7 +329,7 @@ class TransformerAutoencoderModule(pl.LightningModule):
         encoded = self.model.encode(joints, device = self.device)
         generated = self.model.generate(encoded, device = self.device)
 
-        self.model.eval_fgd(generated, joints, device = self.device)
+        # self.model.eval_fgd(generated, joints, device = self.device)
 
         joints = [j.cpu() for j in joints]
         generated = [g.cpu() for g in generated]
