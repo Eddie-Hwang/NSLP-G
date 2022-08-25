@@ -128,6 +128,7 @@ class SpatialVAEModule(pl.LightningModule):
         batch_size,
         num_workers,
         lr,
+        save_vids,
         **kwargs
     ):
         super().__init__()
@@ -149,6 +150,8 @@ class SpatialVAEModule(pl.LightningModule):
         self.batch_size = batch_size
         self.num_worker = num_workers
         self.lr = lr
+
+        self.save_vids = save_vids
 
     def _common_step(self, batch, stage):
         id = batch['id']
@@ -303,6 +306,9 @@ class SpatialVAEModule(pl.LightningModule):
 
             torch.save(outputs, os.path.join(save_path, 'outputs.pt'))
             
+            if not self.save_vids:
+                return
+
             _iter = zip(origin_list[:self.num_save], generated_list[:self.num_save], id_list[:self.num_save], text_list[:self.num_save])
             for j, d, id, text in _iter:               
                 origin = postprocess(j, H, W, S)
@@ -448,7 +454,8 @@ if __name__=='__main__':
     parser.add_argument('--finetuning', action = 'store_true')
     parser.add_argument('--test', action = 'store_true')
     parser.add_argument('--use_early_stopping', action = 'store_true')
-    parser.add_argument('--log_name', type = str, default = 'spvae')
+    parser.add_argument('--log_name', type = str, default = 'spavae')
+    parser.add_argument('--save_vids', action = 'store_true')
 
     parser = SpatialVAE.add_model_specific_args(parser)
     hparams = parser.parse_args()

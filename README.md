@@ -12,7 +12,7 @@ If you find this code useful in your research, please cite:
 ```
 @inproceedings{hwang2021non,
   title={Non-Autoregressive Sign Language Production with Gaussian Space},
-  author={Hwang, Euijun and Kim, Jung-Ho and Park, Jong-Cheol},
+  author={Hwang, Eui Jun and Kim, Jung-Ho and Park, Jong C.},
   booktitle={The 32nd British Machine Vision Conference (BMVC 21)},
   year={2021},
   organization={British Machine Vision Conference (BMVC)}
@@ -22,7 +22,7 @@ If you find this code useful in your research, please cite:
 ## Installation :construction_worker:
 ### 1. Create conda environment
 ```
-conda env create -f environment.yml
+conda env create -f environment.yaml
 conda activate nslp
 ```
 
