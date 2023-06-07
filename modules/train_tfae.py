@@ -14,11 +14,11 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
 
-from data import load_data
+from backup.data import load_data
 from fid import calculate_frechet_distance
-from layers import PoseEmbLayer, PoseGenerator, PositionalEncoding
+from modules.model.layers import PoseEmbLayer, PoseGenerator, PositionalEncoding
 from render import save_sign_video, save_sign_video_batch
-from utils import noised, postprocess
+from backup.utils import noised, postprocess
 
 
 def get_mean_cov(x):

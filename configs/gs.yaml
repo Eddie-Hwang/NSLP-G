@@ -1,0 +1,87 @@
+model:
+  target: modules.models.nslpg.GaussianSeeker
+  params:
+    base_learning_rate: 1.0e-4
+    monitor: train/loss
+    text_file_path: /data/sl_datasets/phoenix14t/data/ProgressiveTransformersSLP/train.text
+    gloss_file_path: /data/sl_datasets/phoenix14t/data/ProgressiveTransformersSLP/train.gloss
+    text_vocab_cache: /home/ejhwang/NSLP-G/cache/text_vocab.json
+    gloss_vocab_cache: /home/ejhwang/NSLP-G/cache/gloss_vocab.json
+    first_stage_config: 
+      target: modules.models.spavae.SpatialVAE
+      params:
+        base_learning_rate: 2.0e-4
+        monitor: valid/recon_loss
+        noise: constant
+        initial_noise_std: 0.5
+        kl_weight: 1.0e-6
+        ckpt_path: /home/ejhwang/NSLP-G/logs/2023-06-02T20-40-12_spavae/checkpoints/epoch=000398.ckpt
+    latent_model_config:
+      target: modules.models.mlp.ResidualMLP
+      params:
+        input_size:
+        output_size:
+    scheduler_config:  
+      target: modules.lr_scheduler.LambdaLinearScheduler
+      params:
+        warm_up_steps:
+        - 10000
+        cycle_lengths:
+        - 10000000000000
+        f_start:
+        - 1.0e-06
+        f_max:
+        - 1.0
+        f_min:
+        - 1.0
+data:
+  target: modules.data.datamodule.DataModuleFromConfig
+  params:
+    batch_size: 64
+    num_workers: 32
+    pin_memory: false
+    train:
+      target: modules.data.phoenix.Phoenix2014T
+      params:
+        text_file_path: /data/sl_datasets/phoenix14t/data/ProgressiveTransformersSLP/train.text
+        gloss_file_path: /data/sl_datasets/phoenix14t/data/ProgressiveTransformersSLP/train.gloss
+        keypoint_file_path: /data/sl_datasets/phoenix14t/data/ProgressiveTransformersSLP/train.skels
+    validation:
+      target: modules.data.phoenix.Phoenix2014T
+      params:
+        text_file_path: /data/sl_datasets/phoenix14t/data/ProgressiveTransformersSLP/dev.text
+        gloss_file_path: /data/sl_datasets/phoenix14t/data/ProgressiveTransformersSLP/dev.gloss
+        keypoint_file_path: /data/sl_datasets/phoenix14t/data/ProgressiveTransformersSLP/dev.skels
+    test:
+      target: modules.data.phoenix.Phoenix2014T
+      params:
+        text_file_path: /data/sl_datasets/phoenix14t/data/ProgressiveTransformersSLP/test.text
+        gloss_file_path: /data/sl_datasets/phoenix14t/data/ProgressiveTransformersSLP/test.gloss
+        keypoint_file_path: /data/sl_datasets/phoenix14t/data/ProgressiveTransformersSLP/test.skels
+lightning:
+  callback:
+    keypoint_logger_callback:
+      target: modules.callbacks.KeypointsLogger
+      params:
+        max_keypoints: 1
+        save_and_sample_every: 10
+        batch_freq: 5
+        renderer_config:
+          target: modules.render.KeypointRenderer
+          params:
+            include_face: false
+            include_hand: true
+            mode: 2d
+    cuda_callback:
+      target: modules.callbacks.CUDACallback
+    learning_rate_logger:
+      target: main.LearningRateMonitor
+      params:
+        logging_interval: step 
+  trainer:
+    accumulate_grad_batch: 2
+    accelerator: gpu
+    devices: auto
+    max_epochs: 2001
+    overfit_batches: 0.
+    gradient_clip_val: 0.

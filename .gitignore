@@ -1,4 +1,6 @@
 backup
-*_logs
+*logs
 __pycache__
 *.txt
+.hypothesis
+cache

@@ -7,7 +7,7 @@ from tokenizers.processors import TemplateProcessing
 from torch.nn.utils.rnn import pad_sequence
 from torchtext.vocab import build_vocab_from_iterator
 
-from utils import load_data
+from backup.utils import load_data
 
 
 def white_space_tokenizer(string):

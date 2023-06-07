@@ -1,0 +1,58 @@
+model:
+  target: modules.models.spavae.SpatialVAE
+  params:
+    base_learning_rate: 2.0e-4
+    monitor: valid/recon_loss
+    noise: constant
+    initial_noise_std: 0.5
+    kl_weight: 1.0e-6
+data:
+  target: modules.data.datamodule.DataModuleFromConfig
+  params:
+    batch_size: 64
+    num_workers: 32
+    train:
+      target: modules.data.phoenix.Phoenix2014T
+      params:
+        text_file_path: /data/sl_datasets/phoenix14t/data/ProgressiveTransformersSLP/train.text
+        gloss_file_path: /data/sl_datasets/phoenix14t/data/ProgressiveTransformersSLP/train.gloss
+        keypoint_file_path: /data/sl_datasets/phoenix14t/data/ProgressiveTransformersSLP/train.skels
+    validation:
+      target: modules.data.phoenix.Phoenix2014T
+      params:
+        text_file_path: /data/sl_datasets/phoenix14t/data/ProgressiveTransformersSLP/dev.text
+        gloss_file_path: /data/sl_datasets/phoenix14t/data/ProgressiveTransformersSLP/dev.gloss
+        keypoint_file_path: /data/sl_datasets/phoenix14t/data/ProgressiveTransformersSLP/dev.skels
+    test:
+      target: modules.data.phoenix.Phoenix2014T
+      params:
+        text_file_path: /data/sl_datasets/phoenix14t/data/ProgressiveTransformersSLP/test.text
+        gloss_file_path: /data/sl_datasets/phoenix14t/data/ProgressiveTransformersSLP/test.gloss
+        keypoint_file_path: /data/sl_datasets/phoenix14t/data/ProgressiveTransformersSLP/test.skels
+lightning:
+  callback:
+    keypoint_logger_callback:
+      target: modules.callbacks.KeypointsLogger
+      params:
+        max_keypoints: 1
+        save_and_sample_every: 10
+        batch_freq: 5
+        renderer_config:
+          target: modules.render.KeypointRenderer
+          params:
+            include_face: false
+            include_hand: true
+            mode: 2d
+    cuda_callback:
+      target: modules.callbacks.CUDACallback
+    learning_rate_logger:
+      target: pytorch_lightning.callbacks.LearningRateMonitor
+      params:
+        logging_interval: step 
+  trainer:
+    accumulate_grad_batch: 2
+    accelerator: gpu
+    devices: auto
+    max_epochs: 2001
+    overfit_batches: 0.
+    gradient_clip_val: 

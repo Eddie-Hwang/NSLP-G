@@ -36,43 +36,9 @@ Note: The data classes are implemented in ```scripts/data.py```, but you can cre
 ## How to use NSLP-G
 #### Training Spatial VAE
 ```bash
-python scripts/train_spavae.py \
-    --accelerator gpu --devices 0 \
-    --num_worker 8 --batch_size 64 \
-    --dataset_type {DATASET_TYPE} \
-    --train_path {TRAIN_PATH} \
-    --valid_path {VALID_PATH} \
-    --test_path {TEST_PATH}
+python main.py -c configs/spavae.yaml
 ```
 #### Training NonAutoregressive SLP
 ```bash
-python scripts/train_nslpg.py \
-    --accelerator gpu --devices 0 \
-    --num_worker 8 --batch_size 64 \
-    --vae_ckpt {PRETRAINED_VAE_CKPT} \
-    --dataset_type {DATASET_TYPE} \
-    --train_path {TRAIN_PATH} \
-    --valid_path {VALID_PATH} \
-    --test_path {TEST_PATH}
-```
-#### Training Transformer Autoencoder
-```bash
-python scripts/train_tfae.py \
-    --accelerator gpu --devices 0 \
-    --num_worker 8 --batch_size 64 \
-    --dataset_type {DATASET_TYPE} \
-    --train_path {TRAIN_PATH} \
-    --valid_path {VALID_PATH} \
-    --test_path {TEST_PATH}
-```
-#### Evaluation FGD
-```bash
-python scripts/eval_fgd.py \
-        --ckpt {CHECKPOINT_PATH}
-        --dataset_type {DATASET_TYPE} \
-        --train_path {TRAIN_PATH} \
-        --valid_path {VALID_PATH} \
-        --test_path {TEST_PATH}
-        --device {CUDA_or_CPU} \
-        --input_dir {INPUT_DIR}
+python main.py -c configs/gs.yaml
 ```
