@@ -2,7 +2,7 @@ model:
   target: modules.models.nslpg.GaussianSeeker
   params:
     base_learning_rate: 1.0e-4
-    monitor: train/loss
+    monitor: train/pose_loss
     text_file_path: /data/sl_datasets/phoenix14t/data/ProgressiveTransformersSLP/train.text
     gloss_file_path: /data/sl_datasets/phoenix14t/data/ProgressiveTransformersSLP/train.gloss
     text_vocab_cache: /home/ejhwang/NSLP-G/cache/text_vocab.json

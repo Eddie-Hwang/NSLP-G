@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 from modules.helpers import (create_mask, get_vocab, instantiate_from_config,
-                     load_vocab, save_vocab, strings_to_indices)
+                     load_vocab, save_vocab, strings_to_indices, indices_to_strings)
 from torch.nn import functional as F
 from torch.nn.utils.rnn import pad_sequence
 from torch.optim.lr_scheduler import LambdaLR
@@ -244,9 +244,8 @@ class GaussianSeeker(pl.LightningModule):
                             width=return_scale_resoution()[0], height=return_scale_resoution()[1]), [reference, generated]))
         reference, generated = list(map(partial(center_keypoints, joint_idx=1), [reference, generated]))
 
-        log["reference"] = reference
-        log["generated"] = generated
-        log["text"] = text
-
+        log["reference"] = reference.detach().cpu()
+        log["generated"] = generated.detach().cpu()
+        log["text"] = indices_to_strings(text.detach().cpu(), self.text_vocab)
+        
         return log 
-
